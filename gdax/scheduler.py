@@ -15,26 +15,117 @@ from websocket import create_connection, WebSocketConnectionClosedException
 from gdax_auth import get_auth_headers
 import queue
 
-msg_queue = queue.Queue()
+from my.my_order_book import OrderBook
+
+
+trade_size_str = "0.2"
+
+
+class Trader(object):
+    """Trader object must run in the Scheduler thread"""
+    def __init__(self, product_id, order_book, api_key, api_secret, api_passphrase):
+        from authenticated_client import AuthenticatedClient
+        self._product_id = product_id
+        self._order_book = order_book
+        self._ac = AuthenticatedClient(api_key, api_secret, api_passphrase)
+
+        # status depends on the strategy
+        """
+        ready
+        buy_sent
+        sell_sent
+        """
+        self._status = "ready"
+        self._buy_order_id = None
+        self._sell_order_id = None
+
+    def on_mkt_msg_end(self):
+        best_bid = self._order_book.get_bid()
+        best_ask = self._order_book.get_ask()
+        if best_ask - best_bid > 1.0:
+            print("WARNING: mkt is wide, best_bid=%.2f best_ask=%.2f" % (best_bid, best_ask))
+
+    def on_user_msg(self, user_msg):
+        if user_msg == 'b':
+            pass
+        elif user_msg == 'c':
+            self.cancel()
+        elif user_msg == 'k':
+            best_bid = self._order_book.get_bid()
+            best_ask = self._order_book.get_ask()
+            print("INFO: best_bid=%.2f best_ask=%.2f" % (best_bid, best_ask))
+
+    def buy(self, buy_price):
+        buy_order_id = None
+        try:
+            buy_price_str = "%.2f" % buy_price
+            buy_response = self._ac.buy(price=buy_price_str, size=trade_size_str,
+                                        product_id=self._product_id, post_only=True)
+            buy_order_id = buy_response['id']
+            print("NOTICE: buy_order is sent: buy_order_id=%s buy_price=%s" % (buy_order_id, buy_price_str))
+            self._status = 'buy_sent'
+        except Exception as e:
+            self._ac.cancel_all(product_id=self._product_id)
+            print("ERROR: problem in buy, cancel all: e=%s buy_response=%s" % (e, buy_response))
+            self._status = 'ready'
+        finally:
+            print("buy_response=%s" % buy_response)
+        return buy_order_id
+
+    def sell(self, sell_price):
+        sell_order_id = None
+        try:
+            sell_price_str = '%.2f' % sell_price
+            sell_response = self._ac.sell(price=sell_price_str, size=trade_size_str,
+                                          product_id=self._product_id, post_only=True)
+            sell_order_id = sell_response['id']
+            print("NOTICE: sell_order is sent: sell_order_id=%s sell_price=%s" % (sell_order_id, sell_price_str))
+            self._status = "sell_sent"
+        except Exception as e:
+            self._ac.cancel_all(product_id=self._product_id)
+            print("ERROR: problem in sell, cancel all: e=%s sell_response=%s" % (e, sell_response))
+            self._status = "ready"
+        finally:
+            print("sell_response=%s" % sell_response)
+        return sell_order_id
+
+    def cancel(self):
+        try:
+            cancel_response = self._ac.cancel_all(product_id=self._product_id)
+            print("NOTICE: cancel is sent: cancel_response=%s" % (cancel_response))
+        except Exception as e:
+            print("ERROR: problem in cancel" % e)
 
 
 class Scheduler(object):
-    def __init__(self, url="wss://ws-feed.gdax.com", products=None, message_type="subscribe", out_filename=None,
-                 should_print=True, auth=False, api_key="", api_secret="", api_passphrase="", channels=None):
+    def __init__(self, url="wss://ws-feed.gdax.com", products=None, channels=None, message_type="subscribe",
+                 should_print=True,
+                 auth=False, api_key="", api_secret="", api_passphrase="",  out_filename=None):
+        if products is None or len(products) != 1:
+            print("ERROR: it only supports one product_id")
+            sys.eixt()
         self.url = url
         self.products = products
         self.channels = channels
         self.type = message_type
+
         self.stop = False
         self.error = None
+
         self.ws = None
         self.thread = None
+
+        self.should_print = should_print
+
         self.auth = auth
         self.api_key = api_key
         self.api_secret = api_secret
         self.api_passphrase = api_passphrase
-        self.should_print = should_print
+        self.user_msg_queue = queue.Queue()
         self.out_file = sys.stdout if out_filename is None else open(out_filename, 'w')
+
+        self.order_book = OrderBook()
+        self.trader = Trader(self.products[0], self.order_book, api_key, api_secret, api_passphrase)
 
     def start(self):
         def _go():
@@ -75,26 +166,34 @@ class Scheduler(object):
             sub_params = {"type": "heartbeat", "on": False}
         self.ws.send(json.dumps(sub_params))
 
-    def _on_user_msg(self, user_msg):
-        print("ERROR: if see it")
-
     def _listen(self):
+        from public_client import PublicClient
+        snapshot = PublicClient().get_product_order_book(product_id=self.products[0], level=3)
+        print(snapshot, file=self.out_file)
+        self.order_book.reset_book(snapshot)
+
         while not self.stop:
             try:
                 if int(time.time() % 30) == 0:
                     # Set a 30 second ping to keep connection alive
                     self.ws.ping("keepalive")
-                data = self.ws.recv()
-                # print('data(%s)=%s' % (type(data), data))
                 try:
-                    msg = json.loads(data)
+                    for i in range(10):
+                        data = self.ws.recv()
+                        # print('data(%s)=%s' % (type(data), data))
+                        mkt_msg = json.loads(data)
+                        # TODO: will put raw_msg in
+                    self.trader.on_mkt_msg_end()
                 except Exception as e:
                     print("ERROR: exception e=%s data=%s" % (e, data))
                 print(data, file=self.out_file)
 
-                if not msg_queue.empty():
-                    user_msg = msg_queue.get(block=True)
-                    self._on_user_msg(user_msg)
+                if not self.user_msg_queue.empty():
+                    user_msg = self.user_msg_queue.get(block=True)
+                    if user_msg in {"stop", "exit", "close"}:
+                        self.close()
+                    else:
+                        self.trader.on_user_msg(user_msg)
             except ValueError as e:
                 self.on_error(e)
             except Exception as e:
@@ -135,6 +234,11 @@ class Scheduler(object):
         self.stop = True
         print('{} - data: {}'.format(e, data))
 
+    # Public API for user
+    def send_user_msg_to_scheduler(self, user_msg):
+        """It's a thread-safe way for main thread to send user_msg"""
+        self.user_msg_queue.put(user_msg, block=True)
+
 
 if __name__ == "__main__":
     import sys
@@ -156,7 +260,13 @@ if __name__ == "__main__":
     #     def on_close(self):
     #         print("-- Goodbye! --")
 
-    wsClient = Scheduler(out_filename=sys.argv[1])
+    api_key = "02f6144c56888a28e55cfb0005f7dab6"
+    api_secret = "W1DDu/KCM0IzsrStCKsH7WY5mY9tJ2jyx148udCek35XYl5Z7yyIiNvtZdZujssEW7KILeqIaA8qQaQ4CZO1Bg=="
+    api_passphrase = "3ut0w1wvnpp"
+
+    wsClient = Scheduler(
+        products=['LTC-USD'],
+        api_key=api_key, api_secret=api_secret, api_passphrase=api_passphrase, out_filename=sys.argv[1])
     wsClient.start()
     print(wsClient.url, wsClient.products)
     try:
