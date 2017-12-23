@@ -282,9 +282,10 @@ if __name__ == "__main__":
     wsClient.start()
     print(wsClient.url, wsClient.products)
     try:
-        while True:
+        #while True:
             # print("\nMessageCount =", "%i \n" % wsClient.message_count)
-            time.sleep(1)
+        #    time.sleep(1)
+        time.sleep(3600 * 24 + 300)
     except KeyboardInterrupt:
         wsClient.close()
 
