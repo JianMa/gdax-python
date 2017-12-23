@@ -109,8 +109,8 @@ class Scheduler(object):
         self.channels = channels
         self.type = message_type
 
-        self.stop = False
         self.error = None
+        self.running_code = None
 
         self.ws = None
         self.thread = None
@@ -129,11 +129,12 @@ class Scheduler(object):
 
     def start(self):
         def _go():
-            self._connect()
-            self._listen()
-            self._disconnect()
+            while self.running_code != "stop":
+                self._connect()
+                self._listen()
+                self._disconnect()
 
-        self.stop = False
+        self.running_code = None
         self.on_open()
         self.thread = Thread(target=_go)
         self.thread.start()
@@ -172,32 +173,40 @@ class Scheduler(object):
         print(snapshot, file=self.out_file)
         self.order_book.reset_book(snapshot)
 
-        while not self.stop:
+        # Avoid string comparison
+        last_hb_time = None
+        while self.running_code is None:
             try:
-                if int(time.time() % 30) == 0:
+                epoch_now_sec = time.time()
+                int_epoch_now_sec = int(epoch_now_sec)
+                if (last_hb_time != int_epoch_now_sec) and (int_epoch_now_sec % 30 == 0):
                     # Set a 30 second ping to keep connection alive
                     self.ws.ping("keepalive")
-                try:
-                    for i in range(10):
-                        data = self.ws.recv()
-                        # print('data(%s)=%s' % (type(data), data))
-                        mkt_msg = json.loads(data)
-                        # TODO: will put raw_msg in
-                    self.trader.on_mkt_msg_end()
-                except Exception as e:
-                    print("ERROR: exception e=%s data=%s" % (e, data))
+                    print("Send keepalive HB: last_hb_time=%s epoch_now_sec=%s" % (last_hb_time, epoch_now_sec), flush=True)
+                    last_hb_time = int_epoch_now_sec
+
+                for i in range(10):
+                    data = self.ws.recv()
+                    # print('data(%s)=%s' % (type(data), data))
+                    mkt_msg = json.loads(data)
+                    # TODO: will put raw_msg in
+                    self.order_book.on_message(mkt_msg)
+                self.trader.on_mkt_msg_end()
                 print(data, file=self.out_file)
 
                 if not self.user_msg_queue.empty():
                     user_msg = self.user_msg_queue.get(block=True)
                     if user_msg in {"stop", "exit", "close"}:
-                        self.close()
+                        print("User stops it", flush=True)
+                        self.running_code = "stop"
                     else:
                         self.trader.on_user_msg(user_msg)
+            except WebSocketConnectionClosedException as e:
+                self.on_error(e, data)
             except ValueError as e:
-                self.on_error(e)
+                self.on_error(e, data)
             except Exception as e:
-                self.on_error(e)
+                self.on_error(e, data)
             else:
                 # self.on_message(msg)
                 pass
@@ -213,10 +222,6 @@ class Scheduler(object):
 
         self.on_close()
 
-    def close(self):
-        self.stop = True
-        self.thread.join()
-
     def on_open(self):
         if self.should_print:
             print("-- Subscribed! --\n")
@@ -230,15 +235,17 @@ class Scheduler(object):
             print(msg)
 
     def on_error(self, e, data=None):
-        self.error = e
-        self.stop = True
+        self.running_code = "reconnect"
         print('{} - data: {}'.format(e, data))
 
-    # Public API for user
+    # Public API for main thread
     def send_user_msg_to_scheduler(self, user_msg):
         """It's a thread-safe way for main thread to send user_msg"""
         self.user_msg_queue.put(user_msg, block=True)
 
+    def close(self):
+        self.send_user_msg_to_scheduler("stop")
+        self.thread.join()
 
 if __name__ == "__main__":
     import sys
