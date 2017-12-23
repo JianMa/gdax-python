@@ -15,15 +15,18 @@ from threading import Thread
 from websocket import create_connection, WebSocketConnectionClosedException
 from gdax_auth import get_auth_headers
 import queue
+import logging
 
 from my.my_order_book import OrderBook
 
 
+logger = None
 trade_size_str = "0.2"
 
 
 def dt_str(dt):
     return dt.strftime("%Y%m%d %H:%M:%S.%f")
+
 
 class Trader(object):
     """Trader object must run in the Scheduler thread"""
@@ -48,7 +51,7 @@ class Trader(object):
         best_ask = self._order_book.get_ask()
         if best_ask - best_bid > 1.0:
             now = datetime.datetime.now()
-            print("WARNING: mkt is wide, now=%s best_bid=%.2f best_ask=%.2f" % (dt_str(now), best_bid, best_ask))
+            logger.warning("mkt is wide, now=%s best_bid=%.2f best_ask=%.2f" % (dt_str(now), best_bid, best_ask))
 
     def on_user_msg(self, user_msg):
         if user_msg == 'b':
@@ -58,7 +61,7 @@ class Trader(object):
         elif user_msg == 'k':
             best_bid = self._order_book.get_bid()
             best_ask = self._order_book.get_ask()
-            print("INFO: best_bid=%.2f best_ask=%.2f" % (best_bid, best_ask))
+            logger.info("best_bid=%.2f best_ask=%.2f" % (best_bid, best_ask))
 
     def buy(self, buy_price):
         buy_order_id = None
@@ -67,14 +70,14 @@ class Trader(object):
             buy_response = self._ac.buy(price=buy_price_str, size=trade_size_str,
                                         product_id=self._product_id, post_only=True)
             buy_order_id = buy_response['id']
-            print("NOTICE: buy_order is sent: buy_order_id=%s buy_price=%s" % (buy_order_id, buy_price_str))
+            logger.critical("buy_order is sent: buy_order_id=%s buy_price=%s" % (buy_order_id, buy_price_str))
             self._status = 'buy_sent'
         except Exception as e:
             self._ac.cancel_all(product_id=self._product_id)
-            print("ERROR: problem in buy, cancel all: e=%s buy_response=%s" % (e, buy_response))
+            logger.critical("ERROR: problem in buy, cancel all: e=%s buy_response=%s" % (e, buy_response))
             self._status = 'ready'
         finally:
-            print("buy_response=%s" % buy_response)
+            logger.critical("buy_response=%s" % buy_response)
         return buy_order_id
 
     def sell(self, sell_price):
@@ -84,22 +87,22 @@ class Trader(object):
             sell_response = self._ac.sell(price=sell_price_str, size=trade_size_str,
                                           product_id=self._product_id, post_only=True)
             sell_order_id = sell_response['id']
-            print("NOTICE: sell_order is sent: sell_order_id=%s sell_price=%s" % (sell_order_id, sell_price_str))
+            logger.critical("sell_order is sent: sell_order_id=%s sell_price=%s" % (sell_order_id, sell_price_str))
             self._status = "sell_sent"
         except Exception as e:
             self._ac.cancel_all(product_id=self._product_id)
-            print("ERROR: problem in sell, cancel all: e=%s sell_response=%s" % (e, sell_response))
+            logger.error("problem in sell, cancel all: e=%s sell_response=%s" % (e, sell_response))
             self._status = "ready"
         finally:
-            print("sell_response=%s" % sell_response)
+            logger.critical("sell_response=%s" % sell_response)
         return sell_order_id
 
     def cancel(self):
         try:
             cancel_response = self._ac.cancel_all(product_id=self._product_id)
-            print("NOTICE: cancel is sent: cancel_response=%s" % (cancel_response))
+            logger.critical("cancel is sent: cancel_response=%s" % (cancel_response))
         except Exception as e:
-            print("ERROR: problem in cancel" % e)
+            logger.error("problem in cancel" % e)
 
 
 class Scheduler(object):
@@ -107,7 +110,7 @@ class Scheduler(object):
                  should_print=True,
                  auth=False, api_key="", api_secret="", api_passphrase="",  out_filename=None):
         if products is None or len(products) != 1:
-            print("ERROR: it only supports one product_id")
+            logger.error("it only supports one product_id")
             sys.eixt()
         self.url = url
         self.products = products
@@ -140,11 +143,12 @@ class Scheduler(object):
                 self._disconnect()
 
         self.running_code = None
-        self.on_open()
         self.thread = Thread(target=_go)
         self.thread.start()
+        logger.info("started thread=%s" % self.thread)
 
     def _connect(self):
+        logger.critical("Connecting...")
         if self.products is None:
             self.products = ["BTC-USD"]
         elif not isinstance(self.products, list):
@@ -187,7 +191,7 @@ class Scheduler(object):
                 if (last_hb_time != int_epoch_now_sec) and (int_epoch_now_sec % 30 == 0):
                     # Set a 30 second ping to keep connection alive
                     self.ws.ping("keepalive")
-                    print("Send keepalive HB: last_hb_time=%s epoch_now_sec=%s" % (last_hb_time, epoch_now_sec), flush=True)
+                    logger.debug("Send keepalive HB: last_hb_time=%s epoch_now_sec=%s" % (last_hb_time, epoch_now_sec))
                     last_hb_time = int_epoch_now_sec
 
                 for i in range(10):
@@ -202,7 +206,7 @@ class Scheduler(object):
                 if not self.user_msg_queue.empty():
                     user_msg = self.user_msg_queue.get(block=True)
                     if user_msg in {"stop", "exit", "close"}:
-                        print("User stops it", flush=True)
+                        logger.warning("User stops it")
                         self.running_code = "stop"
                     else:
                         self.trader.on_user_msg(user_msg)
@@ -217,6 +221,7 @@ class Scheduler(object):
                 pass
 
     def _disconnect(self):
+        logger.critical("Disconnecting...")
         if self.type == "heartbeat":
             self.ws.send(json.dumps({"type": "heartbeat", "on": False}))
         try:
@@ -225,23 +230,13 @@ class Scheduler(object):
         except WebSocketConnectionClosedException as e:
             pass
 
-        self.on_close()
-
-    def on_open(self):
-        if self.should_print:
-            print("-- Subscribed! --\n")
-
-    def on_close(self):
-        if self.should_print:
-            print("\n-- Socket Closed --")
-
     def on_message(self, msg):
         if self.should_print:
-            print(msg)
+            logger.info(msg)
 
     def on_error(self, e, data=None):
         self.running_code = "reconnect"
-        print('{} - data: {}'.format(e, data))
+        logger.error('{} - data: {}'.format(e, data))
 
     # Public API for main thread
     def send_user_msg_to_scheduler(self, user_msg):
@@ -252,11 +247,17 @@ class Scheduler(object):
         self.send_user_msg_to_scheduler("stop")
         self.thread.join()
 
+
 if __name__ == "__main__":
     import sys
     # import gdax
     import time
 
+    logging.basicConfig(
+        format="%(asctime)s %(threadName)s [%(levelname)s] %(message)s",
+        level='DEBUG',
+    )
+    logger = logging.getLogger("COIN")
 
     # class MyWebsocketClient(gdax.Scheduler):
     #     def on_open(self):
@@ -280,7 +281,7 @@ if __name__ == "__main__":
         products=['LTC-USD'],
         api_key=api_key, api_secret=api_secret, api_passphrase=api_passphrase, out_filename=sys.argv[1])
     wsClient.start()
-    print(wsClient.url, wsClient.products)
+    logger.info("url=%s products=%s", wsClient.url, wsClient.products)
     try:
         #while True:
             # print("\nMessageCount =", "%i \n" % wsClient.message_count)

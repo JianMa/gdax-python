@@ -6,7 +6,10 @@
 
 from bintrees import RBTree
 from decimal import Decimal
+import logging
 
+
+logger = logging.getLogger(__name__)
 
 class OrderBook(object):
     def __init__(self, product_id='BTC-USD', feed=None, log_to=None):
@@ -44,7 +47,7 @@ class OrderBook(object):
     def on_message(self, message):
         sequence = message['sequence']
         if self._sequence == -1:
-            print("Expected snapshot before any message")
+            logger.error("Expected snapshot before any message")
             sys.exit()
             # self.reset_book()
             return
@@ -70,7 +73,7 @@ class OrderBook(object):
 
     def on_sequence_gap(self, gap_start, gap_end):
         # self.reset_book()
-        print('Error: messages missing ({} - {}). ignoring the gap.'.format(
+        logger.error('Error: messages missing ({} - {}). ignoring the gap.'.format(
             gap_start, gap_end, self._sequence))
 
     def get_current_ticker(self):
@@ -308,8 +311,8 @@ if __name__ == '__main__':
                 self._ask = ask
                 self._bid_depth = bid_depth
                 self._ask_depth = ask_depth
-                print('{} {} bid: {:.3f} @ {:.2f}\task: {:.3f} @ {:.2f}'.format(
-                    dt.datetime.now(), self.product_id, bid_depth, bid, ask_depth, ask))
+                logger.info('{} bid: {:.3f} @ {:.2f}\task: {:.3f} @ {:.2f}'.format(
+                    self.product_id, bid_depth, bid, ask_depth, ask))
 
     order_book = OrderBookConsole()
     order_book.start()
