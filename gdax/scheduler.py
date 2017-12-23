@@ -5,6 +5,7 @@
 # Template object to receive messages from the gdax Websocket Feed
 
 from __future__ import print_function
+import datetime
 import json
 import base64
 import hmac
@@ -20,6 +21,9 @@ from my.my_order_book import OrderBook
 
 trade_size_str = "0.2"
 
+
+def dt_str(dt):
+    return dt.strftime("%Y%m%d %H:%M:%S.%f")
 
 class Trader(object):
     """Trader object must run in the Scheduler thread"""
@@ -43,7 +47,8 @@ class Trader(object):
         best_bid = self._order_book.get_bid()
         best_ask = self._order_book.get_ask()
         if best_ask - best_bid > 1.0:
-            print("WARNING: mkt is wide, best_bid=%.2f best_ask=%.2f" % (best_bid, best_ask))
+            now = datetime.datetime.now()
+            print("WARNING: mkt is wide, now=%s best_bid=%.2f best_ask=%.2f" % (dt_str(now), best_bid, best_ask))
 
     def on_user_msg(self, user_msg):
         if user_msg == 'b':
