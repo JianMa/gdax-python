@@ -141,7 +141,7 @@ class Scheduler(object):
             while self.running_code != "stop":
                 if connected:
                     logger.info("Reconnecting in 3 secs: running_code=%s" % self.running_code)
-                    time.sleep(3)
+                    time.sleep(30)
                 self._connect()
                 self._listen()
                 self._disconnect()
