@@ -137,10 +137,15 @@ class Scheduler(object):
 
     def start(self):
         def _go():
+            connected = False
             while self.running_code != "stop":
+                if connected:
+                    logger.info("Reconnecting in 3 secs: running_code=%s" % self.running_code)
+                    time.sleep(3)
                 self._connect()
                 self._listen()
                 self._disconnect()
+                connected = True
 
         self.running_code = None
         self.thread = Thread(target=_go)
@@ -198,10 +203,11 @@ class Scheduler(object):
                     data = self.ws.recv()
                     # print('data(%s)=%s' % (type(data), data))
                     mkt_msg = json.loads(data)
+                    # mkt_msg = data
                     # TODO: will put raw_msg in
                     self.order_book.on_message(mkt_msg)
+                    print(data, file=self.out_file)
                 self.trader.on_mkt_msg_end()
-                print(data, file=self.out_file)
 
                 if not self.user_msg_queue.empty():
                     user_msg = self.user_msg_queue.get(block=True)
