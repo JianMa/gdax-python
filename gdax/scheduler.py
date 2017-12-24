@@ -187,8 +187,9 @@ class Scheduler(object):
         print(snapshot, file=self.out_file)
         self.order_book.reset_book(snapshot)
 
-        # Avoid string comparison
         last_hb_time = None
+        # Avoid string comparison
+        self.running_code = None
         while self.running_code is None:
             try:
                 epoch_now_sec = time.time()
