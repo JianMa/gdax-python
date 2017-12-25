@@ -103,7 +103,8 @@ class Scheduler(object):
     def __init__(self, url="wss://ws-feed.gdax.com", products=None, channels=None, message_type="subscribe",
                  should_print=True,
                  auth=False, api_key="", api_secret="", api_passphrase="",
-                 trading_type=None, out_filename=None):
+                 out_filename=None,
+                 order_book=None, trader=None):
         if products is None or len(products) != 1:
             logger.error("it only supports one product_id")
             sys.eixt()
@@ -127,17 +128,13 @@ class Scheduler(object):
 
         self.last_hb_time = 0
 
-        if trading_type == "RECORDER":
+        if out_filename is not None:
             self.out_file = open(out_filename, 'w')
-            self.order_book = None
-            self.trader = None
-        elif trading_type == "TRADER":
-            self.out_file = None
-            self.order_book = OrderBook()
-            self.trader = Trader(self.products[0], self.order_book, api_key, api_secret, api_passphrase)
         else:
-            logger.error("Unsupported trading_type=%s" % trading_type)
-            sys.exit()
+            self.out_file = None
+
+        self.order_book = order_book
+        self.trader = trader
 
     def _connect(self):
         logger.critical("Connecting...")
@@ -173,7 +170,7 @@ class Scheduler(object):
 
     def _check_hb(self, now):
         int_now_sec = int(now.timestamp())
-        if (self.last_hb_time != int_now_sec) and (int_now_sec % 30 == 0):
+        if (self.last_hb_time != int_now_sec) and (int_now_sec % 30 == 0 or int_now_sec - self.last_hb_time >= 30):
             # Set a 30 second ping to keep connection alive
             self.ws.ping("keepalive")
             logger.debug("Send keepalive HB: last_hb_time=%s epoch_now_sec=%s" % (self.last_hb_time, int_now_sec))
@@ -205,6 +202,7 @@ class Scheduler(object):
                 self._check_hb(now)
 
                 for i in range(10):
+                    # TODO: this is a sync call, make it async
                     data = self.ws.recv()
                     mkt_msg = json.loads(data)
                     self._record_msg(now, "update", mkt_msg)
@@ -256,7 +254,7 @@ class Scheduler(object):
 
     def _on_error(self, e, data=None):
         self.running_code = "reconnect"
-        logger.error('%s {} - data: {}'.format(type(e), e, data))
+        logger.error('{} {} - data: {}'.format(type(e), e, data))
 
     def _record_msg(self, recv_time, msg_type, recv_msg):
         record_msg = {
@@ -331,11 +329,23 @@ if __name__ == "__main__":
     api_secret = "W1DDu/KCM0IzsrStCKsH7WY5mY9tJ2jyx148udCek35XYl5Z7yyIiNvtZdZujssEW7KILeqIaA8qQaQ4CZO1Bg=="
     api_passphrase = "3ut0w1wvnpp"
 
+    product_id = 'LTC-USD'
+    trading_type = args.trading_type.upper()
+    if trading_type == 'RECORDER':
+        order_book = None
+        trader = None
+    elif trading_type == "TRADER":
+        order_book = OrderBook()
+        trader = Trader(product_id, order_book, api_key, api_secret, api_passphrase)
+    else:
+        logger.error("Unsupported trading_type=%s" % trading_type)
+        sys.exit()
+
     scheduler = Scheduler(
-        products=['LTC-USD'],
+        products=[product_id],
         api_key=api_key, api_secret=api_secret, api_passphrase=api_passphrase,
-        trading_type=args.trading_type.upper(),
-        out_filename=args.out_file)
+        out_filename=args.out_file,
+        order_book=order_book, trader=trader,)
     scheduler.start()
     error = scheduler.run()
 
