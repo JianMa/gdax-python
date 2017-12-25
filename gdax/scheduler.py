@@ -23,10 +23,6 @@ logger = logging.getLogger(__name__)
 trade_size_str = "0.2"
 
 
-def dt_str(dt):
-    return dt.strftime("%Y%m%d %H:%M:%S.%f")
-
-
 class Trader(object):
     """Trader object must run in the Scheduler thread"""
     def __init__(self, product_id, order_book, api_key, api_secret, api_passphrase):
@@ -49,7 +45,7 @@ class Trader(object):
         best_bid = self._order_book.get_bid()
         best_ask = self._order_book.get_ask()
         if best_ask - best_bid > 1.0:
-            logger.warning("mkt is wide, now=%s best_bid=%.2f best_ask=%.2f" % (dt_str(now), best_bid, best_ask))
+            logger.warning("mkt is wide, now=%s best_bid=%.2f best_ask=%.2f" % (str(now), best_bid, best_ask))
 
     def on_user_msg(self, user_msg):
         if user_msg == 'b':
