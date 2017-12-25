@@ -139,9 +139,10 @@ class Scheduler(object):
         def _go():
             connected = False
             while self.running_code != "stop":
+                wait_time_sec = 3
                 if connected:
-                    logger.info("Reconnecting in 3 secs: running_code=%s" % self.running_code)
-                    time.sleep(30)
+                    logger.info("Reconnecting in %s secs: running_code=%s" % (wait_time_sec, self.running_code))
+                    time.sleep(wait_time_sec)
                 self._connect()
                 self._listen()
                 self._disconnect()
