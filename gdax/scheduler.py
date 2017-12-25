@@ -1,15 +1,14 @@
 # gdax/scheduler.py
 # original author: Jian
 #
-#
-# Template object to receive messages from the gdax Websocket Feed
+# Template object to receive messages from the gdax Websocket
 
-from __future__ import print_function
+# from __future__ import print_function
 import datetime
 import json
-import base64
-import hmac
-import hashlib
+# import base64
+# import hmac
+# import hashlib
 import time
 from threading import Thread
 from websocket import create_connection, WebSocketConnectionClosedException
@@ -20,7 +19,7 @@ import logging
 from my.my_order_book import OrderBook
 
 
-logger = None
+logger = logging.getLogger(__name__)
 trade_size_str = "0.2"
 
 
@@ -107,7 +106,8 @@ class Trader(object):
 class Scheduler(object):
     def __init__(self, url="wss://ws-feed.gdax.com", products=None, channels=None, message_type="subscribe",
                  should_print=True,
-                 auth=False, api_key="", api_secret="", api_passphrase="",  out_filename=None):
+                 auth=False, api_key="", api_secret="", api_passphrase="",
+                 trading_type=None, out_filename=None):
         if products is None or len(products) != 1:
             logger.error("it only supports one product_id")
             sys.eixt()
@@ -116,7 +116,6 @@ class Scheduler(object):
         self.channels = channels
         self.type = message_type
 
-        self.error = None
         self.running_code = None
 
         self.ws = None
@@ -129,28 +128,20 @@ class Scheduler(object):
         self.api_secret = api_secret
         self.api_passphrase = api_passphrase
         self.user_msg_queue = queue.Queue()
-        self.out_file = sys.stdout if out_filename is None else open(out_filename, 'w')
 
-        self.order_book = OrderBook()
-        self.trader = Trader(self.products[0], self.order_book, api_key, api_secret, api_passphrase)
+        self.last_hb_time = 0
 
-    def start(self):
-        def _go():
-            connected = False
-            while self.running_code != "stop":
-                if connected:
-                    wait_time_sec = 3
-                    logger.info("Reconnecting in %s secs: running_code=%s" % (wait_time_sec, self.running_code))
-                    time.sleep(wait_time_sec)
-                self._connect()
-                self._listen()
-                self._disconnect()
-                connected = True
-
-        self.running_code = None
-        self.thread = Thread(target=_go)
-        self.thread.start()
-        logger.info("started thread=%s" % self.thread)
+        if trading_type == "RECORDER":
+            self.out_file = open(out_filename, 'w')
+            self.order_book = None
+            self.trader = None
+        elif trading_type == "TRADER":
+            self.out_file = None
+            self.order_book = OrderBook()
+            self.trader = Trader(self.products[0], self.order_book, api_key, api_secret, api_passphrase)
+        else:
+            logger.error("Unsupported trading_type=%s" % trading_type)
+            sys.exit()
 
     def _connect(self):
         logger.critical("Connecting...")
@@ -181,43 +172,75 @@ class Scheduler(object):
             sub_params = {"type": "heartbeat", "on": False}
         self.ws.send(json.dumps(sub_params))
 
-    def _listen(self):
+    def _init_hb(self):
+        self.last_hb_time = 0
+
+    def _check_hb(self, now):
+        int_now_sec = int(now.timestamp())
+        if (self.last_hb_time != int_now_sec) and (int_now_sec % 30 == 0):
+            # Set a 30 second ping to keep connection alive
+            self.ws.ping("keepalive")
+            logger.debug("Send keepalive HB: last_hb_time=%s epoch_now_sec=%s" % (self.last_hb_time, int_now_sec))
+            self.last_hb_time = int_now_sec
+
+    def _check_user_msg(self):
+        if self.user_msg_queue.empty():
+            return
+
+        user_msg = self.user_msg_queue.get(block=True)
+        if user_msg in {"stop", "exit", "close"}:
+            logger.warning("User stops it")
+            self.running_code = "stop"
+        else:
+            self.trader.on_user_msg(user_msg)
+
+    def _listen_recorder(self):
         ss_now = datetime.datetime.now()
         from public_client import PublicClient
         snapshot = PublicClient().get_product_order_book(product_id=self.products[0], level=3)
         self._record_msg(ss_now, "snapshot", snapshot)
-        self.order_book.reset_book(snapshot)
 
-        last_hb_time = None
+        self._init_hb()
         # Avoid string comparison
         self.running_code = None
         while self.running_code is None:
             try:
-                epoch_now_sec = time.time()
-                int_epoch_now_sec = int(epoch_now_sec)
-                if (last_hb_time != int_epoch_now_sec) and (int_epoch_now_sec % 30 == 0):
-                    # Set a 30 second ping to keep connection alive
-                    self.ws.ping("keepalive")
-                    logger.debug("Send keepalive HB: last_hb_time=%s epoch_now_sec=%s" % (last_hb_time, epoch_now_sec))
-                    last_hb_time = int_epoch_now_sec
-
                 now = datetime.datetime.now()
+                self._check_hb(now)
+
                 for i in range(10):
                     data = self.ws.recv()
-
                     mkt_msg = json.loads(data)
                     self._record_msg(now, "update", mkt_msg)
-                    self.order_book.on_message(mkt_msg)
 
+                self._check_user_msg()
+            except WebSocketConnectionClosedException as e:
+                self._on_error(e, data)
+            except ValueError as e:
+                self._on_error(e, data)
+            except Exception as e:
+                self._on_error(e, data)
+
+    def _listen_trader(self):
+        from public_client import PublicClient
+        snapshot = PublicClient().get_product_order_book(product_id=self.products[0], level=3)
+        self.order_book.reset_book(snapshot)
+
+        self._init_hb()
+        # Avoid string comparison
+        self.running_code = None
+        while self.running_code is None:
+            try:
+                now = datetime.datetime.now()
+                self._check_hb(now)
+
+                for i in range(10):
+                    data = self.ws.recv()
+                    mkt_msg = json.loads(data)
+                    self.order_book.on_message(mkt_msg)
                 self.trader.on_mkt_msg_end(now)
 
-                if not self.user_msg_queue.empty():
-                    user_msg = self.user_msg_queue.get(block=True)
-                    if user_msg in {"stop", "exit", "close"}:
-                        logger.warning("User stops it")
-                        self.running_code = "stop"
-                    else:
-                        self.trader.on_user_msg(user_msg)
+                self._check_user_msg()
             except WebSocketConnectionClosedException as e:
                 self._on_error(e, data)
             except ValueError as e:
@@ -252,6 +275,41 @@ class Scheduler(object):
         """It's a thread-safe way for main thread to send user_msg"""
         self.user_msg_queue.put(user_msg, block=True)
 
+    def start(self):
+        def _go():
+            connected = False
+            while self.running_code != "stop":
+                if connected:
+                    wait_time_sec = 3
+                    logger.info("Reconnecting in %s secs: running_code=%s" % (wait_time_sec, self.running_code))
+                    time.sleep(wait_time_sec)
+                self._connect()
+                if self.trader:
+                    self._listen_trader()
+                else:
+                    self._listen_recorder()
+                self._disconnect()
+                connected = True
+
+        self.running_code = None
+        self.thread = Thread(target=_go)
+        self.thread.start()
+        logger.info("started thread=%s" % self.thread)
+
+    def run(self):
+        import time
+        logger.info("url=%s products=%s", self.url, self.products)
+        try:
+            if self.trader:
+                while True:
+                    user_msg = input()
+                    self.send_user_msg_to_scheduler(user_msg)
+            else:
+                time.sleep(3600 * 24 + 300)
+        except KeyboardInterrupt:
+            self.close()
+        return 0
+
     def close(self):
         self.send_user_msg_to_scheduler("stop")
         self.thread.join()
@@ -259,47 +317,33 @@ class Scheduler(object):
 
 if __name__ == "__main__":
     import sys
-    # import gdax
-    import time
+    import argparse
+
+    parser = argparse.ArgumentParser(description='Scheduler For Trading')
+    parser.add_argument('-t', '--trading_type', dest='trading_type', required=True,
+                        help='Choices of RECORDER or TRADER')
+    parser.add_argument('-o', '--out_file', dest='out_file',
+                        help='Specify output file for RECORDER')
+    args = parser.parse_args()
 
     logging.basicConfig(
         format="%(asctime)s %(threadName)s [%(levelname)s] %(message)s",
         level='DEBUG',
     )
-    logger = logging.getLogger("COIN")
-
-    # class MyWebsocketClient(gdax.Scheduler):
-    #     def on_open(self):
-    #         self.url = "wss://ws-feed.gdax.com/"
-    #         self.products = ["BTC-USD", "ETH-USD"]
-    #         self.message_count = 0
-    #         print("Let's count the messages!")
-    #
-    #     def on_message(self, msg):
-    #         print(json.dumps(msg, indent=4, sort_keys=True))
-    #         self.message_count += 1
-    #
-    #     def on_close(self):
-    #         print("-- Goodbye! --")
 
     api_key = "02f6144c56888a28e55cfb0005f7dab6"
     api_secret = "W1DDu/KCM0IzsrStCKsH7WY5mY9tJ2jyx148udCek35XYl5Z7yyIiNvtZdZujssEW7KILeqIaA8qQaQ4CZO1Bg=="
     api_passphrase = "3ut0w1wvnpp"
 
-    wsClient = Scheduler(
+    scheduler = Scheduler(
         products=['LTC-USD'],
-        api_key=api_key, api_secret=api_secret, api_passphrase=api_passphrase, out_filename=sys.argv[1])
-    wsClient.start()
-    logger.info("url=%s products=%s", wsClient.url, wsClient.products)
-    try:
-        #while True:
-            # print("\nMessageCount =", "%i \n" % wsClient.message_count)
-        #    time.sleep(1)
-        time.sleep(3600 * 24 + 300)
-    except KeyboardInterrupt:
-        wsClient.close()
+        api_key=api_key, api_secret=api_secret, api_passphrase=api_passphrase,
+        trading_type=args.trading_type.upper(),
+        out_filename=args.out_file)
+    scheduler.start()
+    error = scheduler.run()
 
-    if wsClient.error:
+    if error:
         sys.exit(1)
     else:
         sys.exit(0)
