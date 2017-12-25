@@ -46,11 +46,10 @@ class Trader(object):
         self._buy_order_id = None
         self._sell_order_id = None
 
-    def on_mkt_msg_end(self):
+    def on_mkt_msg_end(self, now):
         best_bid = self._order_book.get_bid()
         best_ask = self._order_book.get_ask()
         if best_ask - best_bid > 1.0:
-            now = datetime.datetime.now()
             logger.warning("mkt is wide, now=%s best_bid=%.2f best_ask=%.2f" % (dt_str(now), best_bid, best_ask))
 
     def on_user_msg(self, user_msg):
@@ -139,8 +138,8 @@ class Scheduler(object):
         def _go():
             connected = False
             while self.running_code != "stop":
-                wait_time_sec = 3
                 if connected:
+                    wait_time_sec = 3
                     logger.info("Reconnecting in %s secs: running_code=%s" % (wait_time_sec, self.running_code))
                     time.sleep(wait_time_sec)
                 self._connect()
@@ -183,9 +182,10 @@ class Scheduler(object):
         self.ws.send(json.dumps(sub_params))
 
     def _listen(self):
+        ss_now = datetime.datetime.now()
         from public_client import PublicClient
         snapshot = PublicClient().get_product_order_book(product_id=self.products[0], level=3)
-        print(snapshot, file=self.out_file)
+        self._record_msg(ss_now, "snapshot", snapshot)
         self.order_book.reset_book(snapshot)
 
         last_hb_time = None
@@ -201,15 +201,15 @@ class Scheduler(object):
                     logger.debug("Send keepalive HB: last_hb_time=%s epoch_now_sec=%s" % (last_hb_time, epoch_now_sec))
                     last_hb_time = int_epoch_now_sec
 
+                now = datetime.datetime.now()
                 for i in range(10):
                     data = self.ws.recv()
-                    # print('data(%s)=%s' % (type(data), data))
+
                     mkt_msg = json.loads(data)
-                    # mkt_msg = data
-                    # TODO: will put raw_msg in
+                    self._record_msg(now, "update", mkt_msg)
                     self.order_book.on_message(mkt_msg)
-                    print(data, file=self.out_file)
-                self.trader.on_mkt_msg_end()
+
+                self.trader.on_mkt_msg_end(now)
 
                 if not self.user_msg_queue.empty():
                     user_msg = self.user_msg_queue.get(block=True)
@@ -219,14 +219,11 @@ class Scheduler(object):
                     else:
                         self.trader.on_user_msg(user_msg)
             except WebSocketConnectionClosedException as e:
-                self.on_error(e, data)
+                self._on_error(e, data)
             except ValueError as e:
-                self.on_error(e, data)
+                self._on_error(e, data)
             except Exception as e:
-                self.on_error(e, data)
-            else:
-                # self.on_message(msg)
-                pass
+                self._on_error(e, data)
 
     def _disconnect(self):
         logger.critical("Disconnecting...")
@@ -238,13 +235,17 @@ class Scheduler(object):
         except WebSocketConnectionClosedException as e:
             pass
 
-    def on_message(self, msg):
-        if self.should_print:
-            logger.info(msg)
-
-    def on_error(self, e, data=None):
+    def _on_error(self, e, data=None):
         self.running_code = "reconnect"
-        logger.error('{} - data: {}'.format(e, data))
+        logger.error('%s {} - data: {}'.format(type(e), e, data))
+
+    def _record_msg(self, recv_time, msg_type, recv_msg):
+        record_msg = {
+            "recv_time": str(recv_time),
+            "msg_type": msg_type,
+            "recv_msg": recv_msg,
+        }
+        print(record_msg, file=self.out_file)
 
     # Public API for main thread
     def send_user_msg_to_scheduler(self, user_msg):
