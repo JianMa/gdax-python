@@ -46,6 +46,8 @@ class SimScheduler(object):
             elif msg_type == 'update':
                 self.order_book.on_message(recv_msg)
                 if self.trader:
+                    if recv_msg['type'] == 'match':
+                        self.trader.on_mkt_trade(now, recv_msg)
                     self.trader.on_mkt_msg_end(now)
 
     # Public API for main thread
@@ -78,7 +80,9 @@ class SimTrader(object):
         self._buy_order_id = None
         self._sell_order_id = None
         self._cnt = 0
-
+        self._mkt_trade_cnt = 0
+git s
+    # Public APIs
     def on_mkt_msg_end(self, now):
         best_bid = self._order_book.get_bid()
         best_ask = self._order_book.get_ask()
@@ -88,6 +92,15 @@ class SimTrader(object):
             # logger.info("now=%s best_bid=%.2f best_ask=%.2f" % (str(now), best_bid, best_ask))
             print("now=%s best_bid=%.2f best_ask=%.2f" % (str(now), best_bid, best_ask))
         self._cnt += 1
+
+    def on_mkt_trade(self, now, trade):
+        if self._mkt_trade_cnt % 100 == 0:
+            print("now=%s mkt_trade=%s" % (str(now), trade))
+        self._mkt_trade_cnt += 1
+        pass
+
+    def on_self_trade(self, now, trade):
+        pass
 
 
 if __name__ == "__main__":

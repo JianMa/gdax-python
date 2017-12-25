@@ -20,83 +20,6 @@ from my.my_order_book import OrderBook
 
 
 logger = logging.getLogger(__name__)
-trade_size_str = "0.2"
-
-
-class Trader(object):
-    """Trader object must run in the Scheduler thread"""
-    def __init__(self, product_id, order_book, api_key, api_secret, api_passphrase):
-        from authenticated_client import AuthenticatedClient
-        self._product_id = product_id
-        self._order_book = order_book
-        self._ac = AuthenticatedClient(api_key, api_secret, api_passphrase)
-
-        # status depends on the strategy
-        """
-        ready
-        buy_sent
-        sell_sent
-        """
-        self._status = "ready"
-        self._buy_order_id = None
-        self._sell_order_id = None
-
-    def on_mkt_msg_end(self, now):
-        best_bid = self._order_book.get_bid()
-        best_ask = self._order_book.get_ask()
-        if best_ask - best_bid > 1.0:
-            logger.warning("mkt is wide, now=%s best_bid=%.2f best_ask=%.2f" % (str(now), best_bid, best_ask))
-
-    def on_user_msg(self, user_msg):
-        if user_msg == 'b':
-            pass
-        elif user_msg == 'c':
-            self.cancel()
-        elif user_msg == 'k':
-            best_bid = self._order_book.get_bid()
-            best_ask = self._order_book.get_ask()
-            logger.info("best_bid=%.2f best_ask=%.2f" % (best_bid, best_ask))
-
-    def buy(self, buy_price):
-        buy_order_id = None
-        try:
-            buy_price_str = "%.2f" % buy_price
-            buy_response = self._ac.buy(price=buy_price_str, size=trade_size_str,
-                                        product_id=self._product_id, post_only=True)
-            buy_order_id = buy_response['id']
-            logger.critical("buy_order is sent: buy_order_id=%s buy_price=%s" % (buy_order_id, buy_price_str))
-            self._status = 'buy_sent'
-        except Exception as e:
-            self._ac.cancel_all(product_id=self._product_id)
-            logger.critical("ERROR: problem in buy, cancel all: e=%s buy_response=%s" % (e, buy_response))
-            self._status = 'ready'
-        finally:
-            logger.critical("buy_response=%s" % buy_response)
-        return buy_order_id
-
-    def sell(self, sell_price):
-        sell_order_id = None
-        try:
-            sell_price_str = '%.2f' % sell_price
-            sell_response = self._ac.sell(price=sell_price_str, size=trade_size_str,
-                                          product_id=self._product_id, post_only=True)
-            sell_order_id = sell_response['id']
-            logger.critical("sell_order is sent: sell_order_id=%s sell_price=%s" % (sell_order_id, sell_price_str))
-            self._status = "sell_sent"
-        except Exception as e:
-            self._ac.cancel_all(product_id=self._product_id)
-            logger.error("problem in sell, cancel all: e=%s sell_response=%s" % (e, sell_response))
-            self._status = "ready"
-        finally:
-            logger.critical("sell_response=%s" % sell_response)
-        return sell_order_id
-
-    def cancel(self):
-        try:
-            cancel_response = self._ac.cancel_all(product_id=self._product_id)
-            logger.critical("cancel is sent: cancel_response=%s" % (cancel_response))
-        except Exception as e:
-            logger.error("problem in cancel" % e)
 
 
 class Scheduler(object):
@@ -232,6 +155,8 @@ class Scheduler(object):
                     data = self.ws.recv()
                     mkt_msg = json.loads(data)
                     self.order_book.on_message(mkt_msg)
+                    if mkt_msg['type'] == 'match':
+                        self.trader.on_mkt_trade(now, mkt_msg)
                 self.trader.on_mkt_msg_end(now)
 
                 self._check_user_msg()
@@ -307,6 +232,92 @@ class Scheduler(object):
     def close(self):
         self.send_user_msg_to_scheduler("stop")
         self.thread.join()
+
+
+class Trader(object):
+    """Trader object must run in the Scheduler thread"""
+    def __init__(self, product_id, order_book, api_key, api_secret, api_passphrase):
+        from authenticated_client import AuthenticatedClient
+        self._product_id = product_id
+        self._order_book = order_book
+        self._ac = AuthenticatedClient(api_key, api_secret, api_passphrase)
+
+        # status depends on the strategy
+        """
+        ready
+        buy_sent
+        sell_sent
+        """
+        self._status = "ready"
+        self._buy_order_id = None
+        self._sell_order_id = None
+
+    # Public APIs
+    def on_mkt_msg_end(self, now):
+        best_bid = self._order_book.get_bid()
+        best_ask = self._order_book.get_ask()
+        if best_ask - best_bid > 1.0:
+            logger.warning("mkt is wide, now=%s best_bid=%.2f best_ask=%.2f" % (str(now), best_bid, best_ask))
+
+    def on_user_msg(self, user_msg):
+        if user_msg == 'b':
+            pass
+        elif user_msg == 'c':
+            self.cancel()
+        elif user_msg == 'k':
+            best_bid = self._order_book.get_bid()
+            best_ask = self._order_book.get_ask()
+            logger.info("best_bid=%.2f best_ask=%.2f" % (best_bid, best_ask))
+
+    def on_mkt_trade(self, now, trade):
+        pass
+
+    def on_self_trade(self, now, trade):
+        pass
+
+    # Private APIs
+    def buy(self, buy_price, buy_size=0.2):
+        buy_order_id = None
+        try:
+            buy_price_str = '%.2f' % buy_price
+            buy_size_str = '%.2f' % buy_size
+            buy_response = self._ac.buy(price=buy_price_str, size=buy_size_str,
+                                        product_id=self._product_id, post_only=True)
+            buy_order_id = buy_response['id']
+            logger.critical("buy_order is sent: buy_order_id=%s buy_price=%s" % (buy_order_id, buy_price_str))
+            self._status = 'buy_sent'
+        except Exception as e:
+            self._ac.cancel_all(product_id=self._product_id)
+            logger.critical("ERROR: problem in buy, cancel all: e=%s buy_response=%s" % (e, buy_response))
+            self._status = 'ready'
+        finally:
+            logger.critical("buy_response=%s" % buy_response)
+        return buy_order_id
+
+    def sell(self, sell_price, sell_size=0.2):
+        sell_order_id = None
+        try:
+            sell_price_str = '%.2f' % sell_price
+            sell_size_str = '%.2f' % sell_size
+            sell_response = self._ac.sell(price=sell_price_str, size=sell_size_str,
+                                          product_id=self._product_id, post_only=True)
+            sell_order_id = sell_response['id']
+            logger.critical("sell_order is sent: sell_order_id=%s sell_price=%s" % (sell_order_id, sell_price_str))
+            self._status = "sell_sent"
+        except Exception as e:
+            self._ac.cancel_all(product_id=self._product_id)
+            logger.error("problem in sell, cancel all: e=%s sell_response=%s" % (e, sell_response))
+            self._status = "ready"
+        finally:
+            logger.critical("sell_response=%s" % sell_response)
+        return sell_order_id
+
+    def cancel(self):
+        try:
+            cancel_response = self._ac.cancel_all(product_id=self._product_id)
+            logger.critical("cancel is sent: cancel_response=%s" % (cancel_response))
+        except Exception as e:
+            logger.error("problem in cancel" % e)
 
 
 if __name__ == "__main__":
