@@ -81,7 +81,7 @@ class SimTrader(object):
         self._sell_order_id = None
         self._cnt = 0
         self._mkt_trade_cnt = 0
-git s
+
     # Public APIs
     def on_mkt_msg_end(self, now):
         best_bid = self._order_book.get_bid()
